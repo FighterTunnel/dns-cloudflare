@@ -4,7 +4,7 @@ from cloudflare import Cloudflare, APIError
 import json
 import re
 import threading
-# Configuration file
+import os
 CONFIG_FILE = "config.json"
 
 def load_config():
@@ -176,22 +176,32 @@ def add_dns_record(client, zone_id, record_type, name, content, priority=None):
 def add_site_to_cloudflare(client, site_name, account_id=None):
     """Adds a single site to Cloudflare."""
     try:
-        zone = client.zones.create(name=site_name, type="full", jump_start=True, account={"id": account_id} if account_id else None)
+        # Create zone arguments
+        # Removed 'jump_start' as it can cause issues in strict SDK versions if deprecated.
+        args = {
+            "name": site_name,
+            "type": "full"
+        }
+        if account_id:
+            args["account"] = {"id": account_id}
+            
+        zone = client.zones.create(**args)
         return {"success": True, "result": zone}
-    except APIError as e:
+    except Exception as e:
+        # Catch generic Exception to prevent thread crash on TypeError/ValueError
         return {"success": False, "errors": [{"message": str(e)}]}
 
 def enable_email_routing(client, zone_id):
     """Enables email routing for a zone."""
     try:
-        # Using raw post as enabling is often just a setting or the POST Enable endpoint
-        client.post(f"/zones/{zone_id}/email/routing/enable")
+        # cast_to is required in v4+
+        client.post(f"/zones/{zone_id}/email/routing/enable", cast_to=object)
         return {"success": True}
-    except APIError as e:
+    except Exception as e:
         return {"success": False, "errors": [{"message": str(e)}]}
 
 def create_catch_all_route(client, zone_id, forwarding_email):
-    """Creates a catch-all email routing rule using the library."""
+    """Creates a catch-all email routing rule using raw API call."""
     try:
         data = {
             "actions": [
@@ -209,11 +219,12 @@ def create_catch_all_route(client, zone_id, forwarding_email):
             ]
         }
         
-        # Attempt to use the structured resource if available
-        result = client.email_routing.rules.catch_all.update(zone_id=zone_id, **data)
-        return {"success": True, "result": result}
+        # Use raw PUT because SDK structure for catch_all varies or is missing in some versions
+        # Endpoint: PUT /zones/{zone_id}/email/routing/rules/catch_all
+        client.put(f"/zones/{zone_id}/email/routing/rules/catch_all", body=data, cast_to=object)
+        return {"success": True}
         
-    except APIError as e:
+    except Exception as e:
         return {"success": False, "errors": [{"message": str(e)}]}
 
 
@@ -221,59 +232,75 @@ def create_catch_all_route(client, zone_id, forwarding_email):
 
 def process_sites_thread(api_token, email, sites_to_add, forwarding_email, results_text, start_button):
     """Worker thread function to process sites."""
-    save_config(api_token, email, forwarding_email)
-    
-    # Initialize Client
-    try:
-        client = get_cloudflare_client(api_token, email)
-        # Attempt to get account ID once for adding sites, if needed. 
-        # Usually not strictly required if token is scoped, but good practice.
-        account_id = get_account_id(client)
-    except Exception as e:
-         log_message(results_text, f"Error initializing Cloudflare client: {str(e)}\n")
-         start_button.after(0, lambda: start_button.config(state=tk.NORMAL))
-         return
+    try: # Broad try-except to catch any unexpected errors in the thread
+        save_config(api_token, email, forwarding_email)
+        
+        # Initialize Client
+        try:
+            client = get_cloudflare_client(api_token, email)
+            # Attempt to get account ID once for adding sites, if needed. 
+            account_id = get_account_id(client)
+        except Exception as e:
+             log_message(results_text, f"Error initializing Cloudflare client: {str(e)}\n")
+             start_button.after(0, lambda: start_button.config(state=tk.NORMAL))
+             return
 
-    log_message(results_text, "Starting Add Site process...\n\n")
-
-    for site_name in sites_to_add:
-        site_name = site_name.strip()
-        if not site_name:
-            continue
-
-        # 1. Add site
-        log_message(results_text, f"Adding site: {site_name}...\n")
-        add_result = add_site_to_cloudflare(client, site_name, account_id)
-
-        if add_result.get("success"):
-            zone = add_result["result"]
-            zone_id = zone.id if hasattr(zone, 'id') else zone.get('id')
-            
-            log_message(results_text, f"  > Success! Zone ID: {zone_id}\n")
-
-            # 2. Enable Email Routing
-            log_message(results_text, f"  > Enabling email routing...\n")
-            enable_result = enable_email_routing(client, zone_id)
-            if enable_result.get("success"):
-                log_message(results_text, f"  > Email routing enabled.\n")
-
-                # 3. Create Catch-All Rule
-                log_message(results_text, f"  > Creating catch-all rule for {forwarding_email}...\n")
-                route_result = create_catch_all_route(client, zone_id, forwarding_email)
-                if route_result.get("success"):
-                    log_message(results_text, f"  > Catch-all rule created successfully.\n\n")
-                else:
-                    errors = route_result.get("errors", [{"message": "Unknown error"}])
-                    log_message(results_text, f"  > FAILED to create catch-all rule: {errors[0]['message']}\n\n")
-            else:
-                errors = enable_result.get("errors", [{"message": "Unknown error"}])
-                log_message(results_text, f"  > FAILED to enable email routing: {errors[0]['message']}\n\n")
+        log_message(results_text, "Starting Add Site process...\n")
+        if account_id:
+             log_message(results_text, f"Using Account ID: {account_id}\n")
         else:
-            errors = add_result.get("errors", [{"message": "Unknown error"}])
-            log_message(results_text, f"FAILED to add '{site_name}': {errors[0]['message']}\n\n")
+             log_message(results_text, f"Warning: No Account ID found. Trying to add without it.\n")
 
-    log_message(results_text, "Process finished.")
-    start_button.after(0, lambda: start_button.config(state=tk.NORMAL))
+        log_message(results_text, "\n")
+
+        for site_name in sites_to_add:
+            site_name = site_name.strip()
+            if not site_name:
+                continue
+
+            try: # Inner try-except for individual site processing
+                # 1. Add site
+                log_message(results_text, f"Adding site: {site_name}...\n")
+                add_result = add_site_to_cloudflare(client, site_name, account_id)
+
+                if add_result.get("success"):
+                    zone = add_result["result"]
+                    # The object returned might be a Pydantic model or dict depending on version.
+                    # Accessing as attribute is safer for new SDKs.
+                    zone_id = zone.id if hasattr(zone, 'id') else zone.get('id')
+                    
+                    log_message(results_text, f"  > Success! Zone ID: {zone_id}\n")
+
+                    # 2. Enable Email Routing
+                    log_message(results_text, f"  > Enabling email routing...\n")
+                    enable_result = enable_email_routing(client, zone_id)
+                    if enable_result.get("success"):
+                        log_message(results_text, f"  > Email routing enabled.\n")
+
+                        # 3. Create Catch-All Rule
+                        log_message(results_text, f"  > Creating catch-all rule for {forwarding_email}...\n")
+                        route_result = create_catch_all_route(client, zone_id, forwarding_email)
+                        if route_result.get("success"):
+                            log_message(results_text, f"  > Catch-all rule created successfully.\n\n")
+                        else:
+                            errors = route_result.get("errors", [{"message": "Unknown error"}])
+                            log_message(results_text, f"  > FAILED to create catch-all rule: {errors[0]['message']}\n\n")
+                    else:
+                        errors = enable_result.get("errors", [{"message": "Unknown error"}])
+                        log_message(results_text, f"  > FAILED to enable email routing: {errors[0]['message']}\n\n")
+                else:
+                    errors = add_result.get("errors", [{"message": "Unknown error"}])
+                    log_message(results_text, f"FAILED to add '{site_name}': {errors[0]['message']}\n\n")
+            
+            except Exception as e:
+                log_message(results_text, f"CRITICAL ERROR processing {site_name}: {str(e)}\n\n")
+
+        log_message(results_text, "Process finished.")
+        
+    except Exception as greater_e:
+        log_message(results_text, f"Fatal Thread Error: {str(greater_e)}\n")
+    finally:
+        start_button.after(0, lambda: start_button.config(state=tk.NORMAL))
 
 def process_subdomains_thread(api_token, email, sites_to_process, subdomain, results_text, sub_button):
     """Worker thread to add subdomain routing records."""
