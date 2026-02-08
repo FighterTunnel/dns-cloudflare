@@ -303,57 +303,51 @@ def process_sites_thread(api_token, email, sites_to_add, forwarding_email, resul
         start_button.after(0, lambda: start_button.config(state=tk.NORMAL))
 
 def process_subdomains_thread(api_token, email, sites_to_process, subdomain, results_text, sub_button):
-    """Worker thread to add subdomain routing records."""
-    
-    # Initialize Client
+    """Worker thread to add subdomain routing records using valid Dashboard flow."""
     try:
-        client = get_cloudflare_client(api_token, email)
-    except Exception as e:
-         log_message(results_text, f"Error initializing Cloudflare client: {str(e)}\n")
-         sub_button.after(0, lambda: sub_button.config(state=tk.NORMAL))
-         return
-
-    log_message(results_text, f"Starting Subdomain Setup for '{subdomain}'...\n\n")
+        # Initialize Client
+        try:
+            client = get_cloudflare_client(api_token, email)
+        except Exception as e:
+             log_message(results_text, f"Error initializing Cloudflare client: {str(e)}\n")
+             sub_button.after(0, lambda: sub_button.config(state=tk.NORMAL))
+             return
     
-    mx_records = [
-        ("route1.mx.cloudflare.net", 1),
-        ("route2.mx.cloudflare.net", 5),
-        ("route3.mx.cloudflare.net", 10)
-    ]
-    txt_record = "v=spf1 include:_spf.mx.cloudflare.net ~all"
-
-    for site_name in sites_to_process:
-        site_name = site_name.strip()
-        if not site_name:
-            continue
+        log_message(results_text, f"Starting Subdomain Setup for '{subdomain}'...\n\n")
+        
+        for site_name in sites_to_process:
+            site_name = site_name.strip()
+            if not site_name:
+                continue
+                
+            full_subdomain = f"{subdomain}.{site_name}"
+            log_message(results_text, f"Processing {site_name} (Subdomain: {full_subdomain})...\n")
             
-        log_message(results_text, f"Processing {site_name}...\n")
+            # Resolve Zone ID
+            zone_id = get_zone_id(client, site_name)
+            if not zone_id:
+                 log_message(results_text, f"  > FAILED: Could not find Zone ID for {site_name}\n")
+                 continue
+            
+            # Use the official endpoint to enable email routing for subdomain (Dashboard flow)
+            # This automatically adds the necessary MX and TXT records.
+            try:
+                # client.email_routing.dns.create(zone_id=..., name=...)
+                # Based on SDK structure inspected: email_routing.dns.create
+                res = client.email_routing.dns.create(zone_id=zone_id, name=full_subdomain)
+                
+                # The response object usually contains the created records or success status
+                log_message(results_text, f"  > Success! Enabled email routing for {full_subdomain}.\n\n")
+                
+            except Exception as e:
+                log_message(results_text, f"  > FAILED: {str(e)}\n\n")
+    
+        log_message(results_text, "Subdomain Setup Finished.")
         
-        # Resolve Zone ID
-        zone_id = get_zone_id(client, site_name)
-        if not zone_id:
-             log_message(results_text, f"  > FAILED: Could not find Zone ID for {site_name}\n")
-             continue
-        
-        # Add MX Records
-        for content, priority in mx_records:
-            log_message(results_text, f"  > Adding MX: {content} (Prio: {priority})...\n")
-            res = add_dns_record(client, zone_id, "MX", subdomain, content, priority)
-            if not res.get("success"):
-                 errors = res.get("errors", [{"message": "Unknown error"}])
-                 log_message(results_text, f"    > Failed: {errors[0]['message']}\n")
-        
-        # Add TXT Record
-        log_message(results_text, f"  > Adding TXT (SPF)...\n")
-        res_txt = add_dns_record(client, zone_id, "TXT", subdomain, txt_record)
-        if not res_txt.get("success"):
-                 errors = res_txt.get("errors", [{"message": "Unknown error"}])
-                 log_message(results_text, f"    > Failed: {errors[0]['message']}\n")
-
-        log_message(results_text, f"  > Done for {site_name}.\n\n")
-
-    log_message(results_text, "Subdomain Setup Finished.")
-    sub_button.after(0, lambda: sub_button.config(state=tk.NORMAL))
+    except Exception as e:
+        log_message(results_text, f"Fatal Error: {str(e)}\n")
+    finally:
+        sub_button.after(0, lambda: sub_button.config(state=tk.NORMAL))
 
 
 def start_adding_sites(api_token_entry, email_entry, sites_text, forwarding_email_entry, results_text, start_button):
