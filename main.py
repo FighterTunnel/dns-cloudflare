@@ -350,6 +350,55 @@ def process_subdomains_thread(api_token, email, sites_to_process, subdomain, res
         sub_button.after(0, lambda: sub_button.config(state=tk.NORMAL))
 
 
+def list_zones_thread(api_token, email, sites_text, log_widget, btn):
+    """Worker to fetch all zones and populate the text area."""
+    try:
+        client = get_cloudflare_client(api_token, email)
+        log_message(log_widget, "Fetching all zones from account...\n")
+        
+        # client.zones.list() returns an iterator that handles pagination automatically in v4
+        zones = client.zones.list()
+        
+        site_names = []
+        count = 0
+        for zone in zones:
+            site_names.append(zone.name)
+            count += 1
+            if count % 10 == 0:
+                log_message(log_widget, f"Found {count} zones so far...\n")
+        
+        log_message(log_widget, f"Finished. Total zones found: {count}\n\n")
+        
+        def update_ui():
+            sites_text.delete(1.0, tk.END)
+            sites_text.insert(tk.END, "\n".join(site_names))
+            
+        sites_text.after(0, update_ui)
+            
+    except Exception as e:
+        log_message(log_widget, f"Error fetching zones: {str(e)}\n")
+    finally:
+        btn.after(0, lambda: btn.config(state=tk.NORMAL))
+
+def start_loading_zones(api_token_entry, email_entry, sites_text, results_text, btn):
+    """Starts the zone listing process."""
+    api_token = api_token_entry.get().strip()
+    email = email_entry.get().strip()
+    
+    if not all([api_token, email]):
+        messagebox.showerror("Error", "Please fill in Token and Email.")
+        return
+
+    btn.config(state=tk.DISABLED)
+    results_text.delete(1.0, tk.END)
+    
+    threading.Thread(
+        target=list_zones_thread,
+        args=(api_token, email, sites_text, results_text, btn),
+        daemon=True
+    ).start()
+
+
 def start_adding_sites(api_token_entry, email_entry, sites_text, forwarding_email_entry, results_text, start_button):
     """Starts the process of adding sites."""
     api_token = api_token_entry.get().strip()
@@ -477,8 +526,19 @@ def main():
     actions_frame = tk.LabelFrame(main_frame, text="Actions", padx=10, pady=10)
     actions_frame.pack(fill="x", pady=5)
 
-    # Subdomain Action (Moved to Left)
-    # Using mutable list for button reference
+    # List Domains Button (Col 0)
+    list_sites_ref = []
+    list_sites_btn = tk.Button(
+        actions_frame,
+        text="List Sites",
+        command=lambda: start_loading_zones(
+            api_token_entry, email_entry, sites_text, results_text, list_sites_ref[0]
+        )
+    )
+    list_sites_ref.append(list_sites_btn)
+    list_sites_btn.grid(row=0, column=0, padx=5, sticky="ew")
+
+    # Subdomain Action (Col 1)
     sub_button_ref = []
     sub_button = tk.Button(
         actions_frame,
@@ -489,13 +549,13 @@ def main():
         )
     )
     sub_button_ref.append(sub_button)
-    sub_button.grid(row=0, column=0, padx=5, sticky="ew")
+    sub_button.grid(row=0, column=1, padx=5, sticky="ew")
 
-    tk.Label(actions_frame, text="Subdomain Name:").grid(row=0, column=1, padx=5, sticky="e")
+    tk.Label(actions_frame, text="Subdomain Name:").grid(row=0, column=2, padx=5, sticky="e")
     subdomain_entry = tk.Entry(actions_frame, width=20)
-    subdomain_entry.grid(row=0, column=2, padx=5)
+    subdomain_entry.grid(row=0, column=3, padx=5)
 
-    # Main Action (Moved to Right)
+    # Main Action (Col 4 - Right)
     start_button_ref = [] 
     start_button = tk.Button(
         actions_frame,
@@ -506,11 +566,10 @@ def main():
         )
     )
     start_button_ref.append(start_button)
-    start_button.grid(row=0, column=3, padx=5, pady=5, sticky="ew")
+    start_button.grid(row=0, column=4, padx=5, pady=5, sticky="ew")
     
-    # Make the default action (now on right) take up remaining space, or share?
-    # Usually "Add Sites" is the big button. Let's give it weight.
-    actions_frame.columnconfigure(3, weight=1)
+    # Expand Col 4
+    actions_frame.columnconfigure(4, weight=1)
 
 
     # --- Results Frame ---
